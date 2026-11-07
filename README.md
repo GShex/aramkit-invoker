@@ -100,6 +100,7 @@ flowchart LR
 - 如果 Riot 更改了海克斯大乱斗的队列号，请修改 `src/champion.rs` 中的 `MAYHEM_QUEUE_ID`（当前为 `2400`）。
 - 页面在加载界面阶段打开；如果希望更早打开，可调整 `src/tracker.rs` 的触发阶段。
 - 系统托盘使用 `tray-icon`；若 Explorer 未就绪，托盘创建可能失败，此时程序会在日志中提示，关闭窗口将直接退出。
+- 国服（WeGame）客户端常以管理员权限运行：普通权限的程序读不到它的命令行，且 `lockfile` 可能为 0 字节。此时程序会自动改用客户端日志 `Game\Logs\LeagueClient Logs\*_LeagueClientUx.log` 中的启动参数获取端口与令牌，无需管理员权限。
 
 ## 目录结构
 
@@ -117,7 +118,7 @@ src/
 ├── tracker.rs       海克斯大乱斗英雄确认状态机
 └── lcu/
     ├── mod.rs       事件与状态类型
-    ├── creds.rs     进程/命令行/lockfile 凭据发现
+    ├── creds.rs     进程/命令行/lockfile/客户端日志 凭据发现
     ├── model.rs     LCU JSON 模型
     ├── client.rs    HTTPS 请求
     └── watcher.rs   后台轮询与触发

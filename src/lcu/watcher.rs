@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 
 use super::client::{build_client, fetch_champ_select, fetch_champion_catalog, fetch_gameflow};
-use super::creds::{discover_credentials, LcuCredentials};
+use super::creds::{discover, LcuCredentials};
 use super::{ChampionPage, LcuEvent, Status};
 use crate::champion::{champion_url_for_alias, is_mayhem_queue, ChampionCatalog};
 use crate::platform::open_url;
@@ -64,7 +64,9 @@ fn run(tx: Sender<LcuEvent>, wake: Wake, stop: Arc<AtomicBool>) {
     );
 
     while !stop.load(Ordering::Relaxed) {
-        match discover_credentials() {
+        let discovery = discover();
+
+        match discovery.credentials {
             Some(credentials) => {
                 missing_client_rounds = 0;
                 poll_client(
@@ -85,12 +87,14 @@ fn run(tx: Sender<LcuEvent>, wake: Wake, stop: Arc<AtomicBool>) {
                     tracker = ChampionTracker::default();
                     previous_phase.clear();
                 }
-                emit_status(
-                    &tx,
-                    &wake,
-                    &mut last_status,
-                    Status::disconnected("请启动英雄联盟客户端"),
-                );
+                // The CN client often runs elevated, so the process is visible
+                // while its credentials are still unreadable for a moment.
+                let message = if discovery.client_running {
+                    "已检测到客户端，正在读取登录凭证…"
+                } else {
+                    "请启动英雄联盟客户端"
+                };
+                emit_status(&tx, &wake, &mut last_status, Status::disconnected(message));
             }
         }
 
