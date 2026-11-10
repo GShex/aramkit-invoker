@@ -2,7 +2,7 @@
 
 [![build-windows](https://github.com/eliozh/aramkit-invoker/actions/workflows/build-windows.yml/badge.svg?branch=main)](https://github.com/eliozh/aramkit-invoker/actions/workflows/build-windows.yml)
 
-Windows 桌面小工具：通过英雄联盟国服客户端的本地 LCU API，在**海克斯大乱斗（ARAM: Mayhem，队列 2400）**确认进入游戏后，自动用默认浏览器打开 ARAMKit 中对应英雄的页面：
+Windows 桌面小工具：通过英雄联盟国服客户端的本地 LCU API，在**海克斯大乱斗（ARAM: Mayhem，队列 2400）**确认进入游戏后，自动在独立的 Microsoft Edge 窗口中打开对应英雄的 ARAMKit 页面：
 
 ```text
 https://aramkit.cn/zh-CN/champions/<champion>
@@ -49,9 +49,9 @@ cargo check --target x86_64-pc-windows-msvc
 ## 使用
 
 1. 启动 `aramkit-invoker.exe`。
-2. 在“ARAMKit 桌面端”一栏选择 ARAMKit 的 `.exe` 或 `.lnk` 路径，点击“保存”。
-3. 正常启动英雄联盟客户端，进入海克斯大乱斗。
-4. 英雄选择结束、进入加载界面时，浏览器会自动打开对应英雄的 ARAMKit 页面。
+2. 在“ARAMKit 桌面端”一栏选择 ARAMKit 的 `.exe` 或 `.lnk` 路径，路径会自动保存。
+3. 在“客户端状态”中展开“启动设置”，再选择 TCLS 或 WeGame。程序会从 Windows 注册表检测启动路径，也可以填写自己的 `.exe` 或 `.lnk` 路径。在“本程序启动时”选择客户端后会自动保存，默认不自动启动。
+4. 英雄选择结束、进入加载界面时，程序会自动打开对应英雄的 ARAMKit 专用窗口。下一局会在同一窗口切换英雄页面，点击“再次打开”也会复用该窗口。从托盘退出程序时会关闭专用窗口。
 5. 关闭窗口不会退出程序；右键托盘图标可“显示主窗口”或“退出”。
 
 配置文件位置：

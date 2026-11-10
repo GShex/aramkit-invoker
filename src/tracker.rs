@@ -72,26 +72,31 @@ impl ChampionTracker {
             .is_some_and(|active| active.game_id != 0 && active.game_id == game_id)
     }
 
+    pub fn has_different_game(&self, game_id: i64) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.game_id != 0 && game_id != 0 && active.game_id != game_id)
+    }
+
     /// Feeds a non-champion-select gameflow phase.
     ///
     /// Returns a trigger exactly once when the game is actually in progress
     /// after a champion-select session in ARAM: Mayhem. `GameStart` only
     /// updates queue information and keeps the pending pick alive.
     pub fn on_phase(&mut self, phase: &str, game_id: i64, mayhem: Option<bool>) -> Option<Trigger> {
+        if self.has_different_game(game_id) || is_terminal_phase(phase) {
+            self.active = None;
+            return None;
+        }
         let active = self.active.as_mut()?;
         if let Some(mayhem) = mayhem {
             active.mayhem = Some(mayhem);
         }
 
         if phase == "InProgress" {
-            let trigger = self.take_ready_trigger(game_id);
-            self.active = None;
-            return trigger;
+            return self.take_ready_trigger(game_id);
         }
 
-        if is_terminal_phase(phase) {
-            self.active = None;
-        }
         None
     }
 
@@ -165,6 +170,21 @@ mod tests {
             tracker.on_phase("InProgress", 42, Some(true)),
             trigger(42, 103)
         );
+    }
+
+    #[test]
+    fn keeps_the_pick_until_queue_information_arrives() {
+        let mut tracker = ChampionTracker::default();
+        tracker.update_champ_select(0, None, Some(103));
+        assert!(!tracker.has_different_game(42));
+        tracker.update_champ_select(42, None, None);
+
+        assert_eq!(tracker.on_phase("InProgress", 42, None), None);
+        assert_eq!(
+            tracker.on_phase("InProgress", 42, Some(true)),
+            trigger(42, 103)
+        );
+        assert_eq!(tracker.on_phase("InProgress", 42, Some(true)), None);
     }
 
     #[test]

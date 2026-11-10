@@ -13,6 +13,34 @@ pub const APP_DIR_NAME: &str = "aramkit-invoker";
 pub struct Config {
     /// Path to the ARAMKit desktop executable.
     pub aramkit_app_path: Option<PathBuf>,
+    pub tcls_path: Option<PathBuf>,
+    pub wegame_path: Option<PathBuf>,
+    pub auto_launch_game: Option<GameLauncher>,
+    pub browser_window: Option<WindowBounds>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GameLauncher {
+    Tcls,
+    WeGame,
+}
+
+impl GameLauncher {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Tcls => "TCLS 客户端",
+            Self::WeGame => "WeGame",
+        }
+    }
 }
 
 impl Config {
@@ -73,6 +101,13 @@ mod tests {
         let path = dir.path().join("nested").join("config.json");
         let config = Config {
             aramkit_app_path: Some(PathBuf::from(r"C:\Apps\ARAMKit\ARAMKit.exe")),
+            browser_window: Some(WindowBounds {
+                x: -1200,
+                y: 80,
+                width: 1000,
+                height: 720,
+            }),
+            ..Config::default()
         };
 
         config.save(&path).expect("save");
@@ -85,6 +120,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let config = Config {
             aramkit_app_path: None,
+            ..Config::default()
         };
 
         config.save(&path).expect("save");
