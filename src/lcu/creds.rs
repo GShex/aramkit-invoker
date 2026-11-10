@@ -170,8 +170,8 @@ fn credentials_from_command_lines(processes: &[LeagueProcess]) -> Option<LcuCred
             credentials = parse_lcu_args(process.args[0].split_whitespace());
         }
 
-        if credentials.is_some() {
-            return credentials;
+        if let Some(credentials) = credentials.filter(port_accepts_connections) {
+            return Some(credentials);
         }
     }
 
@@ -217,14 +217,20 @@ fn credentials_from_lockfiles(roots: &[PathBuf]) -> Option<LcuCredentials> {
             if let Ok(mut contents) = std::fs::read_to_string(&candidate) {
                 let credentials = parse_lockfile(&contents);
                 contents.zeroize();
-                if credentials.is_some() {
-                    return credentials;
+                if let Some(credentials) = credentials.filter(port_accepts_connections) {
+                    return Some(credentials);
                 }
             }
         }
     }
 
     None
+}
+
+fn port_accepts_connections(credentials: &LcuCredentials) -> bool {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], credentials.port));
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(300))
+        .is_ok()
 }
 
 fn credentials_from_logs(roots: &[PathBuf]) -> Option<LcuCredentials> {

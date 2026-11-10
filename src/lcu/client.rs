@@ -29,7 +29,15 @@ pub fn build_client() -> Result<Client> {
 }
 
 pub fn fetch_gameflow(client: &Client, credentials: &LcuCredentials) -> Result<GameflowSession> {
-    get_json(client, credentials, "/lol-gameflow/v1/session")
+    let response = send(client, credentials, "/lol-gameflow/v1/session")?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(GameflowSession {
+            phase: get_json(client, credentials, "/lol-gameflow/v1/gameflow-phase")?,
+            ..GameflowSession::default()
+        });
+    }
+    let response = response.error_for_status().context("游戏流程接口返回错误")?;
+    read_json(response, "游戏流程数据")
 }
 
 pub fn fetch_champ_select(

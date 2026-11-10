@@ -94,7 +94,7 @@ mod imp {
         }
     }
 
-    fn show_window(ctx: &egui::Context) {
+    pub(crate) fn show_window(ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -121,4 +121,6 @@ mod imp {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use imp::show_window;
 pub use imp::Tray;
