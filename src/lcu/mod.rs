@@ -58,6 +58,7 @@ mod mock_core;
 mod mock_lcu_tests {
     use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
@@ -73,8 +74,11 @@ mod mock_lcu_tests {
     };
 
     use super::client::{build_client, fetch_champ_select, fetch_champion_catalog, fetch_gameflow};
-    use super::creds::{parse_lcu_args, LcuCredentials};
-    use super::mock_core::{generate_token, resolve_launch, CliConfig, MockOptions, MockServer};
+    use super::creds::{parse_lcu_args, parse_lockfile, LcuCredentials};
+    use super::mock_core::{
+        generate_token, resolve_launch, run_until_stopped, write_lockfile, write_log, CliConfig,
+        MockOptions, MockServer,
+    };
     use super::model::{ChampSelectSession, GameflowSession};
     use crate::champion::{champion_url_for_alias, is_mayhem_queue};
     use crate::tracker::ChampionTracker;
@@ -878,6 +882,13 @@ mod mock_lcu_tests {
             .expect_err("non-UTF-8 arguments must be rejected");
         assert_eq!(error.exit_code(), 2);
         assert!(error.to_string().contains("UTF-8"), "{error}");
+    }
+
+    // Not `#[cfg(unix)]`: this keeps `collect_utf8_args` live in the test build
+    // on Windows too, where the non-UTF-8 case above is not compiled.
+    #[test]
+    fn utf8_arguments_pass_through_unchanged() {
+        use std::ffi::OsString;
 
         let parsed = super::mock_core::collect_utf8_args(vec![
             OsString::from("LeagueClientUx"),
@@ -978,6 +989,41 @@ mod mock_lcu_tests {
                 "stale argument {stale} must be stripped"
             );
         }
+
+        // A separated value that merely begins with `--` is a value, exactly
+        // as `take_value` treats it, so it must be stripped with its flag.
+        let dash_argv = owned(&[
+            "LeagueClientUx",
+            "--remoting-auth-token",
+            "--dash-prefixed-value",
+            "--app-port",
+            "4444",
+        ]);
+        let resolution = resolve_launch(
+            &dash_argv,
+            None,
+            None,
+            || Ok::<u16, std::io::Error>(3333),
+            || Ok::<String, std::io::Error>("new-token".to_owned()),
+        )
+        .expect("resolution with a dash-prefixed value");
+
+        assert!(
+            !resolution
+                .args
+                .iter()
+                .any(|argument| argument.contains("dash-prefixed-value")),
+            "a dash-prefixed separated token must be stripped: {:?}",
+            resolution.args
+        );
+        assert_eq!(
+            resolution
+                .args
+                .iter()
+                .filter(|argument| argument.starts_with("--app-port"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1263,5 +1309,405 @@ mod mock_lcu_tests {
             "phase-only mode has no queue data, so no trigger"
         );
         assert_eq!(tracker.fire_if_ready(session.game_id()), None);
+    }
+
+    // --- Slice 03: lockfile/log discovery writers and path validation ---
+
+    #[test]
+    fn lockfile_writer_emits_parseable_line() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let port = 54_321u16;
+        let token = generate_token().expect("token");
+
+        // The writer returns paths under its canonicalized root. On Windows
+        // that is a verbatim `\\?\` path with the 8.3 short name resolved, so
+        // the expected path must be built from the canonical root as well.
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let discovery = write_lockfile(root.path(), port, &token).expect("lockfile");
+        let expected_path = canonical_root.join("lockfile");
+        assert_eq!(discovery.path(), expected_path.as_path());
+        assert!(expected_path.exists(), "the lockfile must be written");
+
+        let contents = std::fs::read_to_string(&expected_path).expect("read lockfile");
+        assert!(!contents.contains('\n'), "the lockfile is one line");
+        let parts: Vec<&str> = contents.split(':').collect();
+        assert_eq!(parts.len(), 5, "exactly five lockfile fields");
+        assert_eq!(parts[0], "LeagueClientUx");
+        assert_eq!(parts[1].parse::<u32>(), Ok(std::process::id()));
+        assert_eq!(parts[2].parse::<u16>(), Ok(port));
+        assert!(
+            parts[3].as_bytes() == token.as_bytes(),
+            "the token must round-trip"
+        );
+        assert_eq!(parts[4], "https");
+
+        let parsed = parse_lockfile(&contents).expect("the app parses the mock lockfile");
+        assert_eq!(parsed.port, port);
+        assert!(
+            parsed.token.as_bytes() == token.as_bytes(),
+            "port and token must match"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&expected_path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the lockfile must be owner-only");
+        }
+    }
+
+    #[test]
+    fn log_writer_emits_expected_path_and_head() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let port = 50_414u16;
+        let token = generate_token().expect("token");
+
+        let discovery = write_log(root.path(), port, &token).expect("log");
+        // Compare against the canonicalized root: the writer resolves symlinked
+        // ancestors, and on Windows it returns a verbatim `\\?\` path with the
+        // 8.3 short name expanded.
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let log_directory = canonical_root
+            .join("Game")
+            .join("Logs")
+            .join("LeagueClient Logs");
+        assert_eq!(discovery.path().parent(), Some(log_directory.as_path()));
+
+        let name = discovery
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("file name");
+        assert!(name.ends_with("_LeagueClientUx.log"), "{name}");
+        let stamp = name
+            .strip_suffix("_LeagueClientUx.log")
+            .expect("suffix was just checked");
+        assert!(
+            stamp
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_digit()),
+            "the file name starts with a timestamp: {name}"
+        );
+
+        let mut head = Vec::new();
+        std::fs::File::open(discovery.path())
+            .expect("open log")
+            .take(64 * 1024)
+            .read_to_end(&mut head)
+            .expect("read log head");
+        let text = String::from_utf8_lossy(&head);
+        assert!(
+            text.contains(&format!("--app-port={port}")),
+            "the first 64 KiB must carry the port"
+        );
+        assert!(
+            text.contains(&format!("--remoting-auth-token={token}")),
+            "the first 64 KiB must carry the token"
+        );
+
+        // The advertised token is in the charset the app's log parser accepts.
+        assert!(token
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '_' | '=')));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(discovery.path())
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the log must be owner-only");
+        }
+    }
+
+    #[test]
+    fn rejects_relative_unc_and_escape_roots() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let port = 50_414u16;
+        let token = generate_token().expect("token");
+
+        let invalid_roots = [
+            std::path::PathBuf::from("relative/mock-root"),
+            std::path::PathBuf::from(r"\\server\share\mock-root"),
+            std::path::PathBuf::from("//server/share/mock-root"),
+            std::path::PathBuf::from(r"C:\Riot Games\League of Legends"),
+            root.path().join("nested").join("..").join("other"),
+            root.path().join("does-not-exist"),
+        ];
+        for invalid in &invalid_roots {
+            let error = write_lockfile(invalid, port, &token)
+                .expect_err("an invalid root must be rejected");
+            assert_eq!(error.exit_code(), 2, "{invalid:?}: {error}");
+            assert!(
+                error.to_string().contains("--install-root"),
+                "{invalid:?}: {error}"
+            );
+        }
+        assert!(
+            !root.path().join("lockfile").exists(),
+            "no lockfile may be written for a rejected root"
+        );
+
+        let marker_root = tempfile::tempdir().expect("marker root");
+        std::fs::write(marker_root.path().join("LeagueClient.exe"), b"").expect("marker");
+        let error = write_lockfile(marker_root.path(), port, &token)
+            .expect_err("a real install marker must be rejected");
+        assert_eq!(error.exit_code(), 2);
+        assert!(!marker_root.path().join("lockfile").exists());
+
+        let foreign_root = tempfile::tempdir().expect("foreign root");
+        std::fs::write(foreign_root.path().join("LeagueClientUx.exe"), b"").expect("ux marker");
+        let error = write_lockfile(foreign_root.path(), port, &token)
+            .expect_err("a foreign LeagueClientUx.exe must be rejected");
+        assert_eq!(error.exit_code(), 2);
+        assert!(!foreign_root.path().join("lockfile").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = tempfile::tempdir().expect("outside");
+            let linked_root = root.path().join("linked-root");
+            symlink(outside.path(), &linked_root).expect("root symlink");
+            let error = write_lockfile(&linked_root, port, &token)
+                .expect_err("a symlinked root must be rejected");
+            assert_eq!(error.exit_code(), 2);
+            assert!(
+                !outside.path().join("lockfile").exists(),
+                "no write may follow a symlinked root"
+            );
+
+            let log_root = tempfile::tempdir().expect("log root");
+            symlink(outside.path(), log_root.path().join("Game")).expect("game symlink");
+            let error = write_log(log_root.path(), port, &token)
+                .expect_err("a symlinked log ancestor must be rejected");
+            assert_eq!(error.exit_code(), 2);
+            assert!(
+                !outside.path().join("Logs").exists(),
+                "no directory may be created outside the root"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_root_nested_under_real_install_marker() {
+        let base = tempfile::tempdir().expect("temp dir");
+        std::fs::write(base.path().join("LeagueClient.exe"), b"").expect("marker");
+        let nested = base.path().join("nested").join("mock-root");
+        std::fs::create_dir_all(&nested).expect("nested root");
+        let port = 50_414u16;
+        let token = generate_token().expect("token");
+
+        let error = write_lockfile(&nested, port, &token)
+            .expect_err("an ancestor LeagueClient.exe must reject the root");
+        assert_eq!(error.exit_code(), 2, "{error}");
+        assert!(!nested.join("lockfile").exists());
+
+        std::fs::remove_file(base.path().join("LeagueClient.exe")).expect("unmark");
+        std::fs::write(base.path().join("LeagueClientUx.exe"), b"").expect("ux marker");
+        let error = write_lockfile(&nested, port, &token)
+            .expect_err("an ancestor foreign LeagueClientUx.exe must reject the root");
+        assert_eq!(error.exit_code(), 2, "{error}");
+        assert!(!nested.join("lockfile").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_or_rejects_root_under_symlinked_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).expect("real dir");
+        let nested = real.join("mock-root");
+        std::fs::create_dir(&nested).expect("nested root");
+        let linked = base.path().join("linked");
+        symlink(&real, &linked).expect("ancestor symlink");
+        let requested = linked.join("mock-root");
+        let port = 50_414u16;
+        let token = generate_token().expect("token");
+
+        match write_lockfile(&requested, port, &token) {
+            Ok(discovery) => {
+                let canonical_root = std::fs::canonicalize(&requested).expect("canonical root");
+                assert_eq!(
+                    discovery.path(),
+                    canonical_root.join("lockfile").as_path(),
+                    "writes must use the canonical root, never the raw input"
+                );
+                assert!(canonical_root.join("lockfile").exists());
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.exit_code(),
+                    2,
+                    "a rejected ancestor symlink is a usage error: {error}"
+                );
+                assert!(
+                    !nested.join("lockfile").exists(),
+                    "no file may be written for a rejected root"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_lockfile_leaf() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("target");
+        std::fs::write(&target, b"untouched").expect("target");
+        let leaf = root.path().join("lockfile");
+        symlink(&target, &leaf).expect("leaf symlink");
+        let token = generate_token().expect("token");
+
+        let error = write_lockfile(root.path(), 50_414, &token)
+            .expect_err("a symlinked lockfile leaf must be rejected");
+        assert_ne!(error.exit_code(), 0, "{error}");
+        assert_eq!(
+            std::fs::read(&target).expect("target read"),
+            b"untouched",
+            "the symlink target must not be truncated"
+        );
+        assert!(std::fs::symlink_metadata(&leaf)
+            .expect("leaf metadata")
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_hardlinked_lockfile_leaf() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("target");
+        std::fs::write(&target, b"untouched").expect("target");
+        let leaf = root.path().join("lockfile");
+        // A hardlink is a regular file, so `O_NOFOLLOW` does not stop it.
+        std::fs::hard_link(&target, &leaf).expect("leaf hardlink");
+        let token = generate_token().expect("token");
+
+        let error = write_lockfile(root.path(), 50_414, &token)
+            .expect_err("a hardlinked lockfile leaf must be rejected");
+        assert_ne!(error.exit_code(), 0, "{error}");
+        assert_eq!(
+            std::fs::read(&target).expect("target read"),
+            b"untouched",
+            "the hardlink target must not be modified"
+        );
+        assert!(std::fs::metadata(&leaf).expect("leaf metadata").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_markers_in_world_writable_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let shared = base.path().join("shared");
+        std::fs::create_dir(&shared).expect("shared dir");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777))
+            .expect("world-writable shared dir");
+        std::fs::write(shared.join("LeagueClient.exe"), b"").expect("planted marker");
+
+        let root = shared.join("run");
+        std::fs::create_dir(&root).expect("run root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private run root");
+        let token = generate_token().expect("token");
+
+        {
+            let discovery = write_lockfile(&root, 50_414, &token)
+                .expect("a marker in a world-writable ancestor must be ignored");
+            assert!(discovery.path().exists());
+        }
+
+        // A marker inside the user-chosen root is still honored.
+        std::fs::write(root.join("LeagueClient.exe"), b"").expect("root marker");
+        let error = write_lockfile(&root, 50_414, &token)
+            .expect_err("a marker in the chosen root must still be rejected");
+        assert_eq!(error.exit_code(), 2, "{error}");
+        assert!(!root.join("lockfile").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_bare_known_install_prefix_on_windows() {
+        let token = generate_token().expect("token");
+        let root = std::path::PathBuf::from(r"C:\Riot Games\aramkit-mock-test");
+        let error = write_lockfile(&root, 50_414, &token)
+            .expect_err("a known Riot Games prefix must be rejected");
+        assert_eq!(error.exit_code(), 2, "{error}");
+    }
+
+    #[test]
+    fn clean_exit_removes_discovery_files() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let port = 50_414u16;
+        let token = generate_token().expect("token");
+        // See `lockfile_writer_emits_parseable_line`: the writer reports paths
+        // under the canonicalized root, not the raw temp root.
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical root");
+        let lockfile_path = canonical_root.join("lockfile");
+
+        {
+            let discovery = write_lockfile(root.path(), port, &token).expect("lockfile");
+            assert_eq!(discovery.path(), lockfile_path.as_path());
+            assert!(lockfile_path.exists());
+        }
+        assert!(
+            !lockfile_path.exists(),
+            "a clean drop removes the lockfile it created"
+        );
+
+        let log_path;
+        {
+            let discovery = write_log(root.path(), port, &token).expect("log");
+            log_path = discovery.path().to_path_buf();
+            assert!(log_path.exists());
+        }
+        assert!(
+            !log_path.exists(),
+            "a clean drop removes the log it created"
+        );
+
+        // The temporary root is still usable for another run.
+        let discovery = write_lockfile(root.path(), port, &token).expect("second lockfile");
+        assert!(discovery.path().exists());
+        assert!(root.path().join("lockfile").exists());
+    }
+
+    #[test]
+    fn shutdown_flag_runs_cleanup() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let token = generate_token().expect("token");
+        let discovery = write_lockfile(root.path(), 50_414, &token).expect("lockfile");
+        let path = discovery.path().to_path_buf();
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flipper = {
+            let flag = Arc::clone(&flag);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                flag.store(true, Ordering::SeqCst);
+            })
+        };
+
+        run_until_stopped(&flag, || drop(discovery));
+        flipper.join().expect("flipper");
+
+        assert!(
+            !path.exists(),
+            "the stop flag must run the cleanup callback"
+        );
     }
 }
