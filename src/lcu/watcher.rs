@@ -48,12 +48,18 @@ impl WatcherHandle {
     }
 
     pub fn browser_bounds(&self) -> Option<WindowBounds> {
-        self.window.lock().unwrap_or_else(|error| error.into_inner()).bounds()
+        self.window
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .bounds()
     }
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.window.lock().unwrap_or_else(|error| error.into_inner()).close();
+        self.window
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .close();
     }
 }
 
@@ -163,7 +169,9 @@ fn poll_client(
                 let port_state = port_state(credentials.port);
                 let client_gone = matches!(port_state, PortState::Closed);
                 let credentials_rejected = error.chain().any(|cause| {
-                    cause.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status)
+                    cause
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(reqwest::Error::status)
                         == Some(reqwest::StatusCode::UNAUTHORIZED)
                 });
                 if client_gone || credentials_rejected || gameflow_errors >= 20 {
@@ -211,6 +219,16 @@ fn poll_client(
         }
 
         let phase = session.phase.clone();
+        if previous_phase.as_str() != phase {
+            log_event(
+                tx,
+                wake,
+                format!(
+                    "游戏阶段：{previous_phase} → {phase}（对局 {}）",
+                    session.game_id()
+                ),
+            );
+        }
         let game_id = session.game_id();
         let queue = session.queue();
         let mayhem = if queue.id > 0 || is_mayhem_queue(queue.id, &queue.game_mode) {
@@ -237,12 +255,14 @@ fn poll_client(
         if phase == "ChampSelect" {
             game_start_since = None;
             retry_page_after = None;
-            let new_session = previous_phase.as_str() != "ChampSelect"
-                || tracker.has_different_game(game_id);
+            let new_session =
+                previous_phase.as_str() != "ChampSelect" || !tracker.has_pending_pick();
             if new_session {
-                tracker.begin_champ_select(game_id, mayhem);
+                // Gameflow can retain the previous match ID throughout the
+                // next selection. Bind this pick to an ID only when it fires.
+                tracker.begin_champ_select(0, mayhem);
             }
-            tracker.update_champ_select(game_id, mayhem, None);
+            tracker.update_champ_select(0, mayhem, None);
 
             match fetch_champ_select(&client, credentials) {
                 Ok(Some(champion_select)) => {
@@ -250,7 +270,7 @@ fn poll_client(
 
                     if let Some(local_champion_id) = champion_select.local_champion_id() {
                         champion_id = local_champion_id;
-                        tracker.update_champ_select(game_id, mayhem, Some(local_champion_id));
+                        tracker.update_champ_select(0, mayhem, Some(local_champion_id));
 
                         if mayhem != Some(false) {
                             if catalog.is_none() && !catalog_error_logged {
@@ -277,7 +297,7 @@ fn poll_client(
                             };
                         }
                     } else {
-                        tracker.update_champ_select(game_id, mayhem, None);
+                        tracker.update_champ_select(0, mayhem, None);
                         if mayhem != Some(false) {
                             message = "正在选择英雄…".to_owned();
                         }
@@ -337,7 +357,11 @@ fn poll_client(
                 message = opened_message;
                 if !opened {
                     tracker.begin_champ_select(trigger.game_id, Some(true));
-                    tracker.update_champ_select(trigger.game_id, Some(true), Some(trigger.champion_id));
+                    tracker.update_champ_select(
+                        trigger.game_id,
+                        Some(true),
+                        Some(trigger.champion_id),
+                    );
                     retry_page_after = Some(Instant::now() + Duration::from_secs(5));
                 }
             }
@@ -369,7 +393,11 @@ fn handle_trigger(
     wake: &Wake,
     window: &Mutex<ChampionWindow>,
 ) -> (i64, String, String, bool) {
-    if catalog.as_ref().and_then(|catalog| catalog.get(trigger.champion_id)).is_none() {
+    if catalog
+        .as_ref()
+        .and_then(|catalog| catalog.get(trigger.champion_id))
+        .is_none()
+    {
         refresh_catalog(client, credentials, catalog, catalog_error_logged, tx, wake);
     }
 
@@ -451,7 +479,10 @@ fn open_champion_page(
 }
 
 fn open_managed_window(window: &Mutex<ChampionWindow>, url: &str) -> Result<(), String> {
-    window.lock().unwrap_or_else(|error| error.into_inner()).open(url)
+    window
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .open(url)
 }
 
 fn emit_status(

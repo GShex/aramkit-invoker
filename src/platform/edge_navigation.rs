@@ -25,7 +25,7 @@ pub(super) fn navigate(profile: &Path, target_id: &mut Option<String>, url: &str
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let timeout = Duration::from_secs(1);
     let stream = TcpStream::connect_timeout(&address, timeout)?;
-    stream.set_read_timeout(Some(timeout))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(timeout))?;
     let (mut socket, _) = tungstenite::client(format!("ws://{address}{browser_path}"), stream)?;
 
@@ -66,11 +66,20 @@ pub(super) fn navigate(profile: &Path, target_id: &mut Option<String>, url: &str
         }),
     )?;
     let session_id = session["sessionId"].as_str().context("页面连接无效")?;
+    // Cancel an unfinished request from the previous hero before navigating.
+    command(
+        &mut socket,
+        json!({
+            "id": 3,
+            "sessionId": session_id,
+            "method": "Page.stopLoading",
+        }),
+    )?;
     let reload = target["url"].as_str() == Some(url);
     let result = command(
         &mut socket,
         json!({
-            "id": 3,
+            "id": 4,
             "sessionId": session_id,
             "method": if reload { "Page.reload" } else { "Page.navigate" },
             "params": if reload { json!({}) } else { json!({ "url": url }) },
@@ -79,14 +88,21 @@ pub(super) fn navigate(profile: &Path, target_id: &mut Option<String>, url: &str
     if let Some(error) = result["errorText"].as_str() {
         bail!("{error}");
     }
+    let _ = socket.close(None);
     Ok(true)
 }
 
 fn command(socket: &mut WebSocket<TcpStream>, request: Value) -> Result<Value> {
-    socket.send(Message::Text(request.to_string().into()))?;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let method = request["method"].as_str().unwrap_or("DevTools");
+    socket
+        .send(Message::Text(request.to_string().into()))
+        .with_context(|| format!("发送 {method} 失败"))?;
+    let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
-        if let Message::Text(text) = socket.read()? {
+        if let Message::Text(text) = socket
+            .read()
+            .with_context(|| format!("等待 {method} 响应失败"))?
+        {
             let response: Value = serde_json::from_str(text.as_str())?;
             if response["id"] == request["id"] {
                 if let Some(error) = response["error"]["message"].as_str() {

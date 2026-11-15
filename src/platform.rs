@@ -95,7 +95,52 @@ fn registry_value(
     String::from_utf16(&value[..end]).ok()
 }
 
-pub fn launch_game(launcher: GameLauncher, path: &Path) -> Result<(), String> {
+fn process_running(path: &Path, names: &[&str]) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let Ok(mut system) = System::new() else {
+        return false;
+    };
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .without_tasks(),
+    );
+    let canonical = path.canonicalize().ok();
+    system.processes().values().any(|process| {
+        names
+            .iter()
+            .any(|name| process.name().eq_ignore_ascii_case(name))
+            || canonical.as_ref().is_some_and(|expected| {
+                process
+                    .exe()
+                    .and_then(|exe| exe.canonicalize().ok())
+                    .as_ref()
+                    == Some(expected)
+            })
+    })
+}
+
+/// Returns false if the game or selected launcher is already running.
+pub fn launch_game(launcher: GameLauncher, path: &Path) -> Result<bool, String> {
+    let names: &[&str] = match launcher {
+        GameLauncher::Tcls => &[
+            "LeagueClient.exe",
+            "LeagueClientUx.exe",
+            "League of Legends.exe",
+        ],
+        GameLauncher::WeGame => &[
+            "LeagueClient.exe",
+            "LeagueClientUx.exe",
+            "League of Legends.exe",
+            "WeGame.exe",
+        ],
+    };
+    if process_running(path, names) {
+        return Ok(false);
+    }
     validate_app_path(path, true)?;
     if launcher == GameLauncher::WeGame
         && path
@@ -103,9 +148,9 @@ pub fn launch_game(launcher: GameLauncher, path: &Path) -> Result<(), String> {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
     {
         #[cfg(windows)]
-        return launch_windows_with_args(path, Some("wegame://StartFor=26"));
+        return launch_windows_with_args(path, Some("wegame://StartFor=26")).map(|()| true);
     }
-    launch_desktop_app(path)
+    launch_program(path).map(|()| true)
 }
 
 /// Opens a champion page in the default browser.
@@ -135,7 +180,9 @@ impl ChampionWindow {
     pub(crate) fn new(bounds: Option<WindowBounds>) -> Self {
         Self {
             bounds,
-            ..Self::default()
+            closed: false,
+            #[cfg(windows)]
+            edge: None,
         }
     }
 
@@ -236,6 +283,12 @@ impl ChampionWindow {
                 let _ = edge.close();
             }
         }
+    }
+}
+
+impl Drop for ChampionWindow {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -464,7 +517,14 @@ pub fn validate_app_path(path: &Path, require_exists: bool) -> Result<(), String
 }
 
 /// Launches the configured ARAMKit desktop executable.
-pub fn launch_desktop_app(path: &Path) -> Result<(), String> {
+pub fn launch_desktop_app(path: &Path) -> Result<bool, String> {
+    if process_running(path, &["ARAMKit.exe"]) {
+        return Ok(false);
+    }
+    launch_program(path).map(|()| true)
+}
+
+fn launch_program(path: &Path) -> Result<(), String> {
     validate_app_path(path, true)?;
 
     #[cfg(windows)]
@@ -560,6 +620,58 @@ pub fn pick_app_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skips_launching_an_executable_that_is_already_running() {
+        let executable = std::env::current_exe().expect("current executable");
+        assert_eq!(launch_desktop_app(&executable), Ok(false));
+        assert_eq!(launch_game(GameLauncher::Tcls, &executable), Ok(false));
+        assert_eq!(launch_game(GameLauncher::WeGame, &executable), Ok(false));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opens a dedicated Edge window"]
+    fn reuses_browser_page_across_matches() {
+        use std::time::{Duration, Instant};
+
+        let mut window = ChampionWindow::new(None);
+        window
+            .open("https://aramkit.cn/zh-CN/champions/ahri")
+            .expect("first page");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if window.bounds().is_some() {
+                let edge = window.edge.as_mut().expect("browser");
+                if edge_navigation::navigate(
+                    edge.profile.path(),
+                    &mut edge.target_id,
+                    "https://aramkit.cn/zh-CN/champions/ahri",
+                )
+                .is_ok()
+                {
+                    break;
+                }
+            }
+            assert!(Instant::now() < deadline, "browser startup timed out");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let edge = window.edge.as_ref().expect("browser");
+        let profile = edge.profile.path().to_path_buf();
+        let target = edge.target_id.clone().expect("page target");
+        let bounds = window.bounds().expect("window bounds");
+        window
+            .open("https://aramkit.cn/zh-CN/champions/lux")
+            .expect("second match");
+        let edge = window.edge.as_ref().expect("browser");
+        assert_eq!(edge.profile.path(), profile);
+        assert_eq!(edge.target_id.as_deref(), Some(target.as_str()));
+        assert_eq!(window.bounds(), Some(bounds));
+        window
+            .open("https://aramkit.cn/zh-CN/champions/lux")
+            .expect("reload");
+        window.close();
+    }
 
     #[test]
     fn accepts_aramkit_champion_urls() {

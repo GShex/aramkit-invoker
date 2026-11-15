@@ -78,6 +78,10 @@ impl ChampionTracker {
             .is_some_and(|active| active.game_id != 0 && game_id != 0 && active.game_id != game_id)
     }
 
+    pub fn has_pending_pick(&self) -> bool {
+        self.active.is_some()
+    }
+
     /// Feeds a non-champion-select gameflow phase.
     ///
     /// Returns a trigger exactly once when the game is actually in progress
@@ -275,6 +279,20 @@ mod tests {
             tracker.on_phase("InProgress", 43, Some(true)),
             trigger(43, 99)
         );
+    }
+
+    #[test]
+    fn second_match_keeps_pick_when_gameflow_id_catches_up() {
+        let mut tracker = mayhem_tracker(103);
+        assert!(tracker.on_phase("InProgress", 42, Some(true)).is_some());
+        tracker.on_phase("EndOfGame", 42, Some(true));
+        // The second selection initially carries the previous game's ID.
+        tracker.begin_champ_select(0, Some(true));
+        tracker.update_champ_select(0, Some(true), Some(99));
+        tracker.on_phase("GameStart", 0, None);
+        assert_eq!(tracker.on_phase("GameStart", 43, Some(true)), None);
+        assert_eq!(tracker.fire_if_ready(43), trigger(43, 99));
+        assert_eq!(tracker.on_phase("InProgress", 43, Some(true)), None);
     }
 
     #[test]
