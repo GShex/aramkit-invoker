@@ -4,6 +4,11 @@ version = "0.1.1"
 edition = "2021"
 description = "League of Legends ARAM Mayhem helper that opens ARAMKit champion pages automatically"
 license = "MIT"
+exclude = ["examples/LeagueClientUx/"]
+
+[[example]]
+name = "LeagueClientUx"
+path = "examples/LeagueClientUx/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -17,6 +22,13 @@ sysinfo = "0.40"
 tempfile = "3"
 webbrowser = "1.2"
 zeroize = "1"
+
+[dev-dependencies]
+libc = "=0.2.191"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+httparse = "=1.10.1"
+base64 = "=0.22.1"
+getrandom = "=0.3.4"
 
 [target.'cfg(windows)'.dependencies]
 rfd = "0.17"
