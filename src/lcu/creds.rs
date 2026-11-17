@@ -182,6 +182,21 @@ fn credentials_from_command_lines(processes: &[LeagueProcess]) -> Option<LcuCred
 fn install_roots(processes: &[LeagueProcess]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
 
+    // Registry and user-configured paths remain readable when the elevated
+    // client does not expose its command line or executable path.
+    let detected = crate::platform::GameInstall::detect();
+    let config = crate::config::default_config_path()
+        .and_then(|path| crate::config::Config::load(&path).ok())
+        .unwrap_or_default();
+    for executable in [config.tcls_path, detected.tcls].into_iter().flatten() {
+        if let Some(directory) = executable.parent() {
+            push_unique(&mut roots, directory.to_path_buf());
+            if let Some(parent) = directory.parent() {
+                push_unique(&mut roots, parent.to_path_buf());
+            }
+        }
+    }
+
     for process in processes {
         let Some(directory) = process.exe.as_deref().and_then(Path::parent) else {
             continue;
@@ -235,7 +250,7 @@ fn port_accepts_connections(credentials: &LcuCredentials) -> bool {
 fn credentials_from_logs(roots: &[PathBuf]) -> Option<LcuCredentials> {
     for root in roots {
         for directory in log_directories(root) {
-            if let Some(credentials) = credentials_from_log_directory(&directory) {
+            if let Some(credentials) = credentials_from_log_directory_matching(&directory, true) {
                 return Some(credentials);
             }
         }
@@ -254,14 +269,25 @@ fn log_directories(root: &Path) -> [PathBuf; 3] {
     ]
 }
 
+#[cfg(test)]
 fn credentials_from_log_directory(directory: &Path) -> Option<LcuCredentials> {
+    credentials_from_log_directory_matching(directory, false)
+}
+
+fn credentials_from_log_directory_matching(
+    directory: &Path,
+    require_live_port: bool,
+) -> Option<LcuCredentials> {
     let mut logs: Vec<(SystemTime, PathBuf)> = std::fs::read_dir(directory)
         .ok()?
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
             let name = path.file_name()?.to_str()?;
-            if !name.ends_with(UX_LOG_SUFFIX) {
+            if !name
+                .to_ascii_lowercase()
+                .ends_with(&UX_LOG_SUFFIX.to_ascii_lowercase())
+            {
                 return None;
             }
 
@@ -279,7 +305,10 @@ fn credentials_from_log_directory(directory: &Path) -> Option<LcuCredentials> {
 
     logs.into_iter()
         .take(MAX_LOG_CANDIDATES)
-        .find_map(|(_, path)| credentials_from_log_file(&path))
+        .find_map(|(_, path)| {
+            credentials_from_log_file(&path)
+                .filter(|credentials| !require_live_port || port_accepts_connections(credentials))
+        })
 }
 
 fn credentials_from_log_file(path: &Path) -> Option<LcuCredentials> {
@@ -615,6 +644,8 @@ mod tests {
 
     #[test]
     fn finds_credentials_in_cn_client_log_layout() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let port = listener.local_addr().expect("address").port();
         let install = tempfile::tempdir().expect("temp dir");
         let logs = install
             .path()
@@ -624,14 +655,35 @@ mod tests {
         std::fs::create_dir_all(&logs).expect("log dir");
         std::fs::write(
             logs.join("2026-11-07T20-00-00_1_LeagueClientUx.log"),
-            "--app-port=50414 --remoting-auth-token=abc-DEF_123",
+            format!("--app-port={port} --remoting-auth-token=abc-DEF_123"),
         )
         .expect("write log");
 
         let credentials =
             credentials_from_logs(&[install.path().to_path_buf()]).expect("credentials");
-        assert_eq!(credentials.port, 50414);
+        assert_eq!(credentials.port, port);
         assert_eq!(credentials.token, "abc-DEF_123");
+    }
+
+    #[test]
+    fn skips_stale_credentials_when_a_later_log_has_a_live_port() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        std::fs::write(
+            directory.path().join("live_LeagueClientUx.log"),
+            format!("--app-port={port} --remoting-auth-token=live-token"),
+        )
+        .expect("write live log");
+        std::fs::write(
+            directory.path().join("stale_LeagueClientUx.log"),
+            "--app-port=1 --remoting-auth-token=stale-token",
+        )
+        .expect("write stale log");
+        let credentials = credentials_from_log_directory_matching(directory.path(), true)
+            .expect("live credentials");
+        assert_eq!(credentials.port, port);
+        assert_eq!(credentials.token, "live-token");
     }
 
     #[test]

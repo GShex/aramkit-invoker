@@ -153,7 +153,8 @@ impl InvokerApp {
 
         if let Some(path) = app.config.aramkit_app_path.clone() {
             match launch_desktop_app(&path) {
-                Ok(()) => app.push_log(format!("已自动启动 ARAMKit：{}", path.display())),
+                Ok(true) => app.push_log(format!("已自动启动 ARAMKit：{}", path.display())),
+                Ok(false) => app.push_log("ARAMKit 已在运行，已跳过启动"),
                 Err(error) => {
                     app.push_log(format!("自动启动 ARAMKit 失败：{error}"));
                 }
@@ -574,7 +575,11 @@ impl InvokerApp {
             .ok_or_else(|| format!("未检测到 {}，请手动填写路径", launcher.label()))
             .and_then(|path| launch_game(launcher, &path));
         let (message, is_error) = match result {
-            Ok(()) => (format!("已请求启动 {}", launcher.label()), false),
+            Ok(true) => (format!("已请求启动 {}", launcher.label()), false),
+            Ok(false) => (
+                format!("游戏或 {} 已在运行，已跳过启动", launcher.label()),
+                false,
+            ),
             Err(error) => (format!("启动 {} 失败：{error}", launcher.label()), true),
         };
         self.push_log(&message);
@@ -670,9 +675,13 @@ impl InvokerApp {
 
         let path = PathBuf::from(path_text);
         match launch_desktop_app(&path) {
-            Ok(()) => {
+            Ok(true) => {
                 self.settings_note = Some(("已启动".to_owned(), false));
                 self.push_log(format!("已启动 ARAMKit：{}", path.display()));
+            }
+            Ok(false) => {
+                self.settings_note = Some(("ARAMKit 已在运行".to_owned(), false));
+                self.push_log("ARAMKit 已在运行，已跳过启动");
             }
             Err(error) => {
                 self.settings_note = Some((error.clone(), true));
@@ -692,6 +701,13 @@ impl InvokerApp {
                         clear = true;
                     }
                     ui.add_space(4.0);
+                    if let Some(path) = &self.config_path {
+                        ui.label(
+                            egui::RichText::new(format!("配置文件路径：{}", path.display()))
+                                .size(11.0)
+                                .color(MUTED),
+                        );
+                    }
 
                     egui::ScrollArea::vertical()
                         .max_height(112.0)

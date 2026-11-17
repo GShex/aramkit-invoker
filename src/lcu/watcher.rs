@@ -219,6 +219,16 @@ fn poll_client(
         }
 
         let phase = session.phase.clone();
+        if previous_phase.as_str() != phase {
+            log_event(
+                tx,
+                wake,
+                format!(
+                    "游戏阶段：{previous_phase} → {phase}（对局 {}）",
+                    session.game_id()
+                ),
+            );
+        }
         let game_id = session.game_id();
         let queue = session.queue();
         let mayhem = if queue.id > 0 || is_mayhem_queue(queue.id, &queue.game_mode) {
@@ -246,11 +256,13 @@ fn poll_client(
             game_start_since = None;
             retry_page_after = None;
             let new_session =
-                previous_phase.as_str() != "ChampSelect" || tracker.has_different_game(game_id);
+                previous_phase.as_str() != "ChampSelect" || !tracker.has_pending_pick();
             if new_session {
-                tracker.begin_champ_select(game_id, mayhem);
+                // Gameflow can retain the previous match ID throughout the
+                // next selection. Bind this pick to an ID only when it fires.
+                tracker.begin_champ_select(0, mayhem);
             }
-            tracker.update_champ_select(game_id, mayhem, None);
+            tracker.update_champ_select(0, mayhem, None);
 
             match fetch_champ_select(&client, credentials) {
                 Ok(Some(champion_select)) => {
@@ -258,7 +270,7 @@ fn poll_client(
 
                     if let Some(local_champion_id) = champion_select.local_champion_id() {
                         champion_id = local_champion_id;
-                        tracker.update_champ_select(game_id, mayhem, Some(local_champion_id));
+                        tracker.update_champ_select(0, mayhem, Some(local_champion_id));
 
                         if mayhem != Some(false) {
                             if catalog.is_none() && !catalog_error_logged {
@@ -285,7 +297,7 @@ fn poll_client(
                             };
                         }
                     } else {
-                        tracker.update_champ_select(game_id, mayhem, None);
+                        tracker.update_champ_select(0, mayhem, None);
                         if mayhem != Some(false) {
                             message = "正在选择英雄…".to_owned();
                         }
