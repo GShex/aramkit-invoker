@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use aramkit_invoker::config::{self, Config, GameLauncher, WindowBounds};
 use aramkit_invoker::lcu::{ChampionPage, LcuEvent, Status, WatcherHandle};
 use aramkit_invoker::platform::{
-    launch_desktop_app, launch_game, pick_app_path, validate_app_path, GameInstall,
+    desktop_app_running, game_or_launcher_running, launch_desktop_app, launch_game, pick_app_path,
+    validate_app_path, GameInstall,
 };
 
 use crate::theme::{
@@ -162,16 +163,29 @@ impl InvokerApp {
         }
 
         if let Some(path) = app.config.aramkit_app_path.clone() {
-            match launch_desktop_app(&path) {
-                Ok(()) => app.push_log(format!("已自动启动 ARAMKit：{}", path.display())),
-                Err(error) => {
-                    app.push_log(format!("自动启动 ARAMKit 失败：{error}"));
+            if desktop_app_running(&path) {
+                app.push_log("检测到 ARAMKit 已运行，已跳过自动启动");
+            } else {
+                match launch_desktop_app(&path) {
+                    Ok(()) => app.push_log(format!("已自动启动 ARAMKit：{}", path.display())),
+                    Err(error) => {
+                        app.push_log(format!("自动启动 ARAMKit 失败：{error}"));
+                    }
                 }
             }
         }
 
         if let Some(launcher) = app.config.auto_launch_game {
-            app.launch_game_now(launcher);
+            let detected = match launcher {
+                GameLauncher::Tcls => &app.game_install.tcls,
+                GameLauncher::WeGame => &app.game_install.wegame,
+            };
+            let path = app.manual_game_path(launcher).or_else(|| detected.clone());
+            if game_or_launcher_running(path.as_deref()) {
+                app.push_log("检测到 WeGame 或游戏已运行，已跳过自动启动游戏");
+            } else {
+                app.launch_game_now(launcher);
+            }
         }
         app
     }

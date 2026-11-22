@@ -108,6 +108,52 @@ pub fn launch_game(launcher: GameLauncher, path: &Path) -> Result<(), String> {
     launch_desktop_app(path)
 }
 
+pub fn game_or_launcher_running(path: Option<&Path>) -> bool {
+    process_running(
+        path,
+        &[
+            "WeGame.exe",
+            "tgp_daemon.exe",
+            "LeagueClient.exe",
+            "LeagueClientUx.exe",
+            "League of Legends.exe",
+        ],
+    )
+}
+
+pub fn desktop_app_running(path: &Path) -> bool {
+    process_running(Some(path), &["ARAMKit.exe"])
+}
+
+fn process_running(path: Option<&Path>, names: &[&str]) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let Ok(mut system) = System::new() else {
+        return false;
+    };
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .without_tasks(),
+    );
+    let executable = path.and_then(|path| path.canonicalize().ok());
+    system.processes().values().any(|process| {
+        // Process names remain available when an elevated process hides its path.
+        names
+            .iter()
+            .any(|name| process.name().eq_ignore_ascii_case(name))
+            || executable.as_ref().is_some_and(|expected| {
+                process
+                    .exe()
+                    .and_then(|path| path.canonicalize().ok())
+                    .as_ref()
+                    == Some(expected)
+            })
+    })
+}
+
 /// Opens a champion page in the default browser.
 ///
 /// Only ARAMKit champion URLs are accepted so that a malformed champion asset
@@ -560,6 +606,19 @@ pub fn pick_app_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_process_is_found_by_executable_or_name() {
+        let executable = std::env::current_exe().expect("test executable");
+        assert!(process_running(Some(&executable), &[]));
+        let name = executable
+            .file_name()
+            .expect("filename")
+            .to_str()
+            .expect("UTF-8");
+        assert!(process_running(None, &[name]));
+        assert!(!process_running(None, &["aramkit-nonexistent-process.exe"]));
+    }
 
     #[test]
     fn accepts_aramkit_champion_urls() {
