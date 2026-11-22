@@ -684,7 +684,7 @@ impl InvokerApp {
             })
             .inner;
         ui.add_space(4.0);
-        ui.label("浏览器页面刷新于");
+        ui.label("ARAMKit页面刷新于");
         changed |= ui
             .horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
