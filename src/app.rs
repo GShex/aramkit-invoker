@@ -69,6 +69,10 @@ pub struct InvokerApp {
     rx: Receiver<LcuEvent>,
     _watcher: WatcherHandle,
     pending_browser_bounds: Option<(WindowBounds, Instant)>,
+    #[cfg(windows)]
+    main_window: Option<crate::main_window::MainWindow>,
+    #[cfg(windows)]
+    pending_main_bounds: Option<(WindowBounds, Instant)>,
     tray: Option<Tray>,
     quitting: Arc<AtomicBool>,
     status: Status,
@@ -103,6 +107,8 @@ impl InvokerApp {
         let wake_context = creation_context.egui_ctx.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || wake_context.request_repaint());
         let watcher = WatcherHandle::spawn(tx, wake, config.browser_window);
+        #[cfg(windows)]
+        let main_window = crate::main_window::MainWindow::new(creation_context, config.main_window);
 
         let path_input = config
             .aramkit_app_path
@@ -128,6 +134,10 @@ impl InvokerApp {
             rx,
             _watcher: watcher,
             pending_browser_bounds: None,
+            #[cfg(windows)]
+            main_window,
+            #[cfg(windows)]
+            pending_main_bounds: None,
             tray: None,
             quitting,
             status: Status::disconnected("请启动英雄联盟客户端"),
@@ -787,6 +797,36 @@ impl InvokerApp {
         let _ = self.write_config(config, "浏览器窗口位置和大小");
     }
 
+    #[cfg(windows)]
+    fn save_main_bounds(&mut self, flush: bool) {
+        let Some(bounds) = self.main_window.as_mut().and_then(|window| window.bounds()) else {
+            return;
+        };
+        if self.config.main_window == Some(bounds) {
+            self.pending_main_bounds = None;
+            return;
+        }
+        if !flush {
+            match self.pending_main_bounds {
+                Some((pending, since)) if pending == bounds => {
+                    if since.elapsed() < Duration::from_secs(1) {
+                        return;
+                    }
+                }
+                _ => {
+                    self.pending_main_bounds = Some((bounds, Instant::now()));
+                    return;
+                }
+            }
+        }
+        let config = Config {
+            main_window: Some(bounds),
+            ..self.config.clone()
+        };
+        self.pending_main_bounds = None;
+        let _ = self.write_config(config, "主窗口位置和大小");
+    }
+
     fn write_config(&mut self, config: Config, setting: &str) -> Result<(), String> {
         if config == self.config {
             return Ok(());
@@ -819,6 +859,8 @@ impl InvokerApp {
 
 impl Drop for InvokerApp {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.save_main_bounds(true);
         self._watcher.stop();
         self.save_browser_bounds(true);
     }
@@ -826,6 +868,8 @@ impl Drop for InvokerApp {
 
 impl eframe::App for InvokerApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        self.save_main_bounds(false);
         self.drain_events();
         self.poll_pending_pick();
         self.refresh_tray();

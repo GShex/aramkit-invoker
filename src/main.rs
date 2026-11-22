@@ -3,6 +3,8 @@
 
 mod app;
 mod icon;
+#[cfg(windows)]
+mod main_window;
 mod theme;
 mod tray;
 

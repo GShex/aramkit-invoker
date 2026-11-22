@@ -17,6 +17,7 @@ pub struct Config {
     pub wegame_path: Option<PathBuf>,
     pub auto_launch_game: Option<GameLauncher>,
     pub browser_window: Option<WindowBounds>,
+    pub main_window: Option<WindowBounds>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,12 @@ mod tests {
                 y: 80,
                 width: 1000,
                 height: 720,
+            }),
+            main_window: Some(WindowBounds {
+                x: -1600,
+                y: 120,
+                width: 800,
+                height: 900,
             }),
             ..Config::default()
         };
