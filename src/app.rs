@@ -670,7 +670,7 @@ impl InvokerApp {
 
     fn browser_options(&mut self, ui: &mut egui::Ui) {
         let mut config = self.config.clone();
-        ui.label("启动时自动打开浏览器主页");
+        ui.label("启动时自动打开ARAMKit主页");
         let mut changed = ui
             .horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 16.0;
