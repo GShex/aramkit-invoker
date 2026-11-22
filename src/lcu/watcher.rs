@@ -10,7 +10,7 @@ use super::creds::{discover, LcuCredentials};
 use super::{ChampionPage, LcuEvent, Status};
 use crate::champion::{champion_url_for_alias, is_mayhem_queue, ChampionCatalog};
 use crate::config::WindowBounds;
-use crate::platform::ChampionWindow;
+use crate::platform::{ChampionWindow, ARAMKIT_HOME};
 use crate::tracker::{ChampionTracker, Trigger};
 
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -23,24 +23,56 @@ const GAME_START_GRACE: Duration = Duration::from_secs(2);
 pub struct WatcherHandle {
     stop: Arc<AtomicBool>,
     window: Arc<Mutex<ChampionWindow>>,
+    refresh_on_selection: Arc<AtomicBool>,
 }
 
 impl WatcherHandle {
-    pub fn spawn(tx: Sender<LcuEvent>, wake: Wake, bounds: Option<WindowBounds>) -> Self {
+    pub fn spawn(
+        tx: Sender<LcuEvent>,
+        wake: Wake,
+        bounds: Option<WindowBounds>,
+        homepage: bool,
+        refresh_on_selection: bool,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_tx = tx.clone();
         let window = Arc::new(Mutex::new(ChampionWindow::new(bounds)));
         let thread_window = Arc::clone(&window);
+        let refresh_on_selection = Arc::new(AtomicBool::new(refresh_on_selection));
+        let thread_refresh = Arc::clone(&refresh_on_selection);
         let spawn_result = std::thread::Builder::new()
             .name("lcu-watcher".to_owned())
-            .spawn(move || run(thread_tx, wake, thread_stop, &thread_window));
+            .spawn(move || {
+                if homepage {
+                    let message = match open_managed_window(&thread_window, ARAMKIT_HOME) {
+                        Ok(()) => "已打开 ARAMKit 浏览器主页".to_owned(),
+                        Err(error) => format!("打开浏览器主页失败：{error}"),
+                    };
+                    log_event(&thread_tx, &wake, message);
+                }
+                run(
+                    thread_tx,
+                    wake,
+                    thread_stop,
+                    &thread_window,
+                    &thread_refresh,
+                );
+            });
 
         if let Err(error) = spawn_result {
             let _ = tx.send(LcuEvent::Log(format!("无法启动后台线程：{error}")));
         }
 
-        Self { stop, window }
+        Self {
+            stop,
+            window,
+            refresh_on_selection,
+        }
+    }
+
+    pub fn set_refresh_on_selection(&self, enabled: bool) {
+        self.refresh_on_selection.store(enabled, Ordering::Relaxed);
     }
 
     pub fn open_url(&self, url: &str) -> Result<(), String> {
@@ -69,7 +101,13 @@ impl Drop for WatcherHandle {
     }
 }
 
-fn run(tx: Sender<LcuEvent>, wake: Wake, stop: Arc<AtomicBool>, window: &Mutex<ChampionWindow>) {
+fn run(
+    tx: Sender<LcuEvent>,
+    wake: Wake,
+    stop: Arc<AtomicBool>,
+    window: &Mutex<ChampionWindow>,
+    refresh_on_selection: &AtomicBool,
+) {
     let mut last_status = None;
     let mut tracker = ChampionTracker::default();
     let mut previous_phase = String::new();
@@ -97,6 +135,7 @@ fn run(tx: Sender<LcuEvent>, wake: Wake, stop: Arc<AtomicBool>, window: &Mutex<C
                     &mut tracker,
                     &mut previous_phase,
                     window,
+                    refresh_on_selection,
                 );
             }
             None => {
@@ -132,6 +171,7 @@ fn poll_client(
     tracker: &mut ChampionTracker,
     previous_phase: &mut String,
     window: &Mutex<ChampionWindow>,
+    refresh_on_selection: &AtomicBool,
 ) {
     let client = match build_client() {
         Ok(client) => client,
@@ -148,6 +188,8 @@ fn poll_client(
     let mut game_start_since: Option<Instant> = None;
     let mut retry_page_after: Option<Instant> = None;
     let mut last_champion_select_error: Option<String> = None;
+    let mut last_selection = None;
+    let mut selection_retry_after = Instant::now();
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -248,6 +290,8 @@ fn poll_client(
             let new_session =
                 previous_phase.as_str() != "ChampSelect" || tracker.has_different_game(game_id);
             if new_session {
+                last_selection = None;
+                selection_retry_after = Instant::now();
                 tracker.begin_champ_select(game_id, mayhem);
             }
             tracker.update_champ_select(game_id, mayhem, None);
@@ -278,6 +322,8 @@ fn poll_client(
                                 .to_owned();
                             message = if mayhem.is_none() {
                                 "已识别英雄，正在读取队列信息…".to_owned()
+                            } else if refresh_on_selection.load(Ordering::Relaxed) {
+                                format!("已识别英雄 {champion_name}，网页随英雄变化更新")
                             } else if champion_name.is_empty() {
                                 "已识别英雄，进入游戏后将打开 ARAMKit 页面".to_owned()
                             } else {
@@ -301,6 +347,34 @@ fn poll_client(
                         log_event(tx, wake, error_message.clone());
                         last_champion_select_error = Some(error_message);
                     }
+                }
+            }
+        }
+
+        if phase == "ChampSelect"
+            && refresh_on_selection.load(Ordering::Relaxed)
+            && Instant::now() >= selection_retry_after
+        {
+            if let Some(trigger) = tracker
+                .selected_champion()
+                .filter(|pick| last_selection != Some(pick.champion_id))
+            {
+                let (_, name, note, opened) = handle_trigger(
+                    &trigger,
+                    &client,
+                    credentials,
+                    &mut catalog,
+                    &mut catalog_error_logged,
+                    tx,
+                    wake,
+                    window,
+                );
+                champion_name = name;
+                message = note;
+                if opened {
+                    last_selection = Some(trigger.champion_id);
+                } else {
+                    selection_retry_after = Instant::now() + Duration::from_secs(5);
                 }
             }
         }
@@ -329,7 +403,10 @@ fn poll_client(
                 game_start_since = None;
             }
 
-            if let Some(trigger) = trigger {
+            if let Some(trigger) = trigger.filter(|pick| {
+                !refresh_on_selection.load(Ordering::Relaxed)
+                    || last_selection != Some(pick.champion_id)
+            }) {
                 let (opened_id, opened_name, opened_message, opened) = handle_trigger(
                     &trigger,
                     &client,

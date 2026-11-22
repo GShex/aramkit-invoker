@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use aramkit_invoker::config::{self, Config, GameLauncher, WindowBounds};
 use aramkit_invoker::lcu::{ChampionPage, LcuEvent, Status, WatcherHandle};
 use aramkit_invoker::platform::{
-    desktop_app_running, game_or_launcher_running, launch_desktop_app, launch_game, pick_app_path,
-    validate_app_path, GameInstall,
+    desktop_app_running, detect_aramkit, game_or_launcher_running, launch_desktop_app, launch_game,
+    pick_app_path, validate_app_path, GameInstall,
 };
 
 use crate::theme::{
@@ -23,6 +23,28 @@ fn game_path_index(launcher: GameLauncher) -> usize {
         GameLauncher::Tcls => 0,
         GameLauncher::WeGame => 1,
     }
+}
+
+fn setting_heading(ui: &mut egui::Ui, title: &str, note: &Option<(String, bool)>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.label(title);
+        if let Some((text, error)) = note {
+            ui.label(
+                egui::RichText::new(text)
+                    .size(11.5)
+                    .color(if *error { BAD } else { OK }),
+            );
+        }
+    });
+}
+
+fn path_status(ui: &mut egui::Ui, detected: Option<&std::path::Path>) {
+    let text = detected.map_or_else(
+        || "未检测到，请手动设置启动程序路径".to_owned(),
+        |path| format!("已检测到 {}", path.display()),
+    );
+    ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(MUTED)).wrap());
 }
 
 fn path_actions(ui: &mut egui::Ui, path: &mut String, hint: &str) -> (bool, bool, bool) {
@@ -64,6 +86,7 @@ pub struct InvokerApp {
     path_input: String,
     settings_note: Option<(String, bool)>,
     game_install: GameInstall,
+    aramkit_detected: Option<PathBuf>,
     game_paths: [String; 2],
     auto_launch_game: Option<GameLauncher>,
     game_note: Option<(String, bool)>,
@@ -107,7 +130,13 @@ impl InvokerApp {
         let (tx, rx) = mpsc::channel();
         let wake_context = creation_context.egui_ctx.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || wake_context.request_repaint());
-        let watcher = WatcherHandle::spawn(tx, wake, config.browser_window);
+        let watcher = WatcherHandle::spawn(
+            tx,
+            wake,
+            config.browser_window,
+            config.browser_open_homepage,
+            config.browser_refresh_on_selection,
+        );
         #[cfg(windows)]
         let main_window = crate::main_window::MainWindow::new(creation_context, config.main_window);
 
@@ -121,6 +150,7 @@ impl InvokerApp {
             #[cfg(windows)]
             instance,
             game_install: GameInstall::detect(),
+            aramkit_detected: detect_aramkit(),
             game_paths: [&config.tcls_path, &config.wegame_path].map(|path| {
                 path.as_ref()
                     .map(|path| path.display().to_string())
@@ -162,17 +192,8 @@ impl InvokerApp {
             Err(error) => app.push_log(format!("系统托盘不可用：{error}")),
         }
 
-        if let Some(path) = app.config.aramkit_app_path.clone() {
-            if desktop_app_running(&path) {
-                app.push_log("检测到 ARAMKit 已运行，已跳过自动启动");
-            } else {
-                match launch_desktop_app(&path) {
-                    Ok(()) => app.push_log(format!("已自动启动 ARAMKit：{}", path.display())),
-                    Err(error) => {
-                        app.push_log(format!("自动启动 ARAMKit 失败：{error}"));
-                    }
-                }
-            }
+        if app.config.auto_launch_aramkit && app.aramkit_path().is_some() {
+            app.launch_now();
         }
 
         if let Some(launcher) = app.config.auto_launch_game {
@@ -182,7 +203,9 @@ impl InvokerApp {
             };
             let path = app.manual_game_path(launcher).or_else(|| detected.clone());
             if game_or_launcher_running(path.as_deref()) {
-                app.push_log("检测到 WeGame 或游戏已运行，已跳过自动启动游戏");
+                let message = "检测到 WeGame 或游戏已启动，已跳过启动";
+                app.game_note = Some((message.to_owned(), false));
+                app.push_log(message);
             } else {
                 app.launch_game_now(launcher);
             }
@@ -308,7 +331,7 @@ impl InvokerApp {
 
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        self.push_log("已最小化到系统托盘");
+        self.push_log("已隐藏到系统托盘");
     }
 
     fn body(&mut self, ui: &mut egui::Ui) {
@@ -407,11 +430,6 @@ impl InvokerApp {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(message).size(13.0).color(TEXT));
             }
-
-            ui.add_space(6.0);
-            egui::CollapsingHeader::new(section_title("启动设置"))
-                .default_open(false)
-                .show(ui, |ui| self.game_launch_options(ui));
         });
     }
 
@@ -488,6 +506,28 @@ impl InvokerApp {
         ui.vertical(|ui| {
             ui.add_space(4.0);
             let mut changed = false;
+            setting_heading(ui, "游戏启动联动", &self.game_note);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                changed |= ui
+                    .radio_value(&mut self.auto_launch_game, None, "不启动游戏")
+                    .changed();
+                changed |= ui
+                    .radio_value(
+                        &mut self.auto_launch_game,
+                        Some(GameLauncher::Tcls),
+                        "TCLS 客户端",
+                    )
+                    .changed();
+                changed |= ui
+                    .radio_value(
+                        &mut self.auto_launch_game,
+                        Some(GameLauncher::WeGame),
+                        "WeGame",
+                    )
+                    .changed();
+            });
+            ui.add_space(4.0);
             for (index, launcher) in [GameLauncher::Tcls, GameLauncher::WeGame]
                 .into_iter()
                 .enumerate()
@@ -497,17 +537,7 @@ impl InvokerApp {
                     GameLauncher::Tcls => &self.game_install.tcls,
                     GameLauncher::WeGame => &self.game_install.wegame,
                 };
-                let status = detected.as_ref().map_or_else(
-                    || "未检测到，请填写启动程序或快捷方式的完整路径".to_owned(),
-                    |path| {
-                        let mut display = path.to_string_lossy().into_owned();
-                        if matches!(display.as_bytes(), [b'a'..=b'z', b':', ..]) {
-                            display[..1].make_ascii_uppercase();
-                        }
-                        format!("已检测到 {display}")
-                    },
-                );
-                ui.label(egui::RichText::new(status).size(11.5).color(MUTED));
+                path_status(ui, detected.as_deref());
                 let (edited, browse, launch) = path_actions(
                     ui,
                     &mut self.game_paths[index],
@@ -526,34 +556,8 @@ impl InvokerApp {
             if ui.button("重新检测").clicked() {
                 self.game_install = GameInstall::detect();
             }
-            ui.separator();
-            let previous = self.auto_launch_game;
-            ui.label("本程序启动时");
-            egui::ComboBox::from_id_salt("auto-launch-game")
-                .selected_text(
-                    self.auto_launch_game
-                        .map_or("不启动游戏", GameLauncher::label),
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.auto_launch_game, None, "不启动游戏");
-                    for launcher in [GameLauncher::Tcls, GameLauncher::WeGame] {
-                        ui.selectable_value(
-                            &mut self.auto_launch_game,
-                            Some(launcher),
-                            launcher.label(),
-                        );
-                    }
-                });
-            changed |= self.auto_launch_game != previous;
             if changed {
                 self.autosave_game_settings();
-            }
-            if let Some((message, is_error)) = &self.game_note {
-                ui.label(egui::RichText::new(message).size(11.5).color(if *is_error {
-                    BAD
-                } else {
-                    OK
-                }));
             }
         });
     }
@@ -565,11 +569,9 @@ impl InvokerApp {
     }
 
     fn autosave_game_settings(&mut self) {
-        let result = self.save_game_settings();
-        self.game_note = Some(match result {
-            Ok(()) => ("已自动保存".to_owned(), false),
-            Err(error) => (error, true),
-        });
+        if let Err(error) = self.save_game_settings() {
+            self.game_note = Some((error, true));
+        }
     }
 
     fn save_game_settings(&mut self) -> Result<(), String> {
@@ -594,6 +596,12 @@ impl InvokerApp {
             GameLauncher::WeGame => &self.game_install.wegame,
         };
         let path = self.manual_game_path(launcher).or_else(|| detected.clone());
+        if game_or_launcher_running(path.as_deref()) {
+            let message = "检测到 WeGame 或游戏已启动，已跳过启动";
+            self.game_note = Some((message.to_owned(), false));
+            self.push_log(message);
+            return;
+        }
         let result = path
             .ok_or_else(|| format!("未检测到 {}，请手动填写路径", launcher.label()))
             .and_then(|path| launch_game(launcher, &path));
@@ -606,36 +614,46 @@ impl InvokerApp {
     }
 
     fn settings_card(&mut self, ui: &mut egui::Ui) {
-        let mut browse = false;
-        let mut launch = false;
-        let mut edited = false;
-        let note = self.settings_note.clone();
-
         card(ui, |ui| {
-            ui.label(section_title("ARAMKit 桌面端"));
+            ui.label(section_title("设置"));
             ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("配置程序路径后，本程序每次启动都会自动启动它。")
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.add_space(10.0);
-
-            (edited, browse, launch) = path_actions(
-                ui,
-                &mut self.path_input,
-                r"例如 C:\Apps\ARAMKit\ARAMKit.exe",
-            );
-
-            if let Some((text, is_error)) = &note {
-                ui.label(egui::RichText::new(text).size(11.5).color(if *is_error {
-                    BAD
-                } else {
-                    OK
-                }));
-            }
+            egui::CollapsingHeader::new("游戏启动设置")
+                .default_open(false)
+                .show(ui, |ui| self.game_launch_options(ui));
+            egui::CollapsingHeader::new("ARAMKit启动设置")
+                .default_open(false)
+                .show(ui, |ui| self.aramkit_launch_options(ui));
+            egui::CollapsingHeader::new("浏览器设置")
+                .default_open(false)
+                .show(ui, |ui| self.browser_options(ui));
         });
+    }
 
+    fn aramkit_launch_options(&mut self, ui: &mut egui::Ui) {
+        setting_heading(ui, "ARAMKit启动联动", &self.settings_note);
+        let mut config = self.config.clone();
+        let changed = ui
+            .horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                let yes = ui
+                    .radio_value(&mut config.auto_launch_aramkit, true, "是")
+                    .changed();
+                let no = ui
+                    .radio_value(&mut config.auto_launch_aramkit, false, "否")
+                    .changed();
+                yes || no
+            })
+            .inner;
+        if changed {
+            if let Err(error) = self.write_config(config, "ARAMKit启动联动") {
+                self.settings_note = Some((error, true));
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("ARAMKit 桌面端").strong());
+        path_status(ui, self.aramkit_detected.as_deref());
+        let (edited, browse, launch) =
+            path_actions(ui, &mut self.path_input, "手动路径（留空使用自动检测）");
         if edited {
             self.save_config();
         }
@@ -645,8 +663,56 @@ impl InvokerApp {
         if launch {
             self.launch_now();
         }
+        if ui.button("重新检测").clicked() {
+            self.aramkit_detected = detect_aramkit();
+        }
     }
 
+    fn browser_options(&mut self, ui: &mut egui::Ui) {
+        let mut config = self.config.clone();
+        ui.label("启动时自动打开浏览器主页");
+        let mut changed = ui
+            .horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                let yes = ui
+                    .radio_value(&mut config.browser_open_homepage, true, "是")
+                    .changed();
+                let no = ui
+                    .radio_value(&mut config.browser_open_homepage, false, "否")
+                    .changed();
+                yes || no
+            })
+            .inner;
+        ui.add_space(4.0);
+        ui.label("浏览器页面刷新于");
+        changed |= ui
+            .horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                let selection = ui
+                    .radio_value(&mut config.browser_refresh_on_selection, true, "更换英雄")
+                    .changed();
+                let entry = ui
+                    .radio_value(&mut config.browser_refresh_on_selection, false, "进入游戏")
+                    .changed();
+                selection || entry
+            })
+            .inner;
+        if changed {
+            if self.write_config(config, "浏览器设置").is_ok() {
+                self._watcher
+                    .set_refresh_on_selection(self.config.browser_refresh_on_selection);
+            }
+        }
+    }
+
+    fn aramkit_path(&self) -> Option<PathBuf> {
+        let manual = self.path_input.trim().trim_matches('"');
+        if manual.is_empty() {
+            self.aramkit_detected.clone()
+        } else {
+            Some(PathBuf::from(manual))
+        }
+    }
     fn save_config(&mut self) {
         let path_text = self.path_input.trim().trim_matches('"').to_owned();
         let new_path = if path_text.is_empty() {
@@ -667,18 +733,7 @@ impl InvokerApp {
         };
 
         match self.write_config(config, "ARAMKit 桌面端路径") {
-            Ok(()) => {
-                let missing = self
-                    .config
-                    .aramkit_app_path
-                    .as_ref()
-                    .is_some_and(|path| !path.is_file());
-                self.settings_note = Some(if missing {
-                    ("已保存，但路径当前不存在".to_owned(), true)
-                } else {
-                    ("已自动保存".to_owned(), false)
-                });
-            }
+            Ok(()) => {}
             Err(error) => {
                 self.settings_note = Some((error, true));
             }
@@ -686,16 +741,19 @@ impl InvokerApp {
     }
 
     fn launch_now(&mut self) {
-        let path_text = self.path_input.trim().trim_matches('"').to_owned();
-        if path_text.is_empty() {
+        let Some(path) = self.aramkit_path() else {
             self.settings_note = Some(("请先配置路径".to_owned(), true));
             return;
+        };
+        if desktop_app_running(&path) {
+            let message = "检测到 ARAMKit 已启动，已跳过启动";
+            self.settings_note = Some((message.to_owned(), false));
+            self.push_log(message);
+            return;
         }
-
-        let path = PathBuf::from(path_text);
         match launch_desktop_app(&path) {
             Ok(()) => {
-                self.settings_note = Some(("已启动".to_owned(), false));
+                self.settings_note = Some(("已请求启动 ARAMKit".to_owned(), false));
                 self.push_log(format!("已启动 ARAMKit：{}", path.display()));
             }
             Err(error) => {
@@ -706,35 +764,48 @@ impl InvokerApp {
     }
 
     fn logs_card(&mut self, ui: &mut egui::Ui) {
-        let mut clear = false;
-
         card(ui, |ui| {
             egui::CollapsingHeader::new(section_title("运行日志"))
                 .default_open(false)
                 .show(ui, |ui| {
-                    if ui.button("清空").clicked() {
-                        clear = true;
+                    let width = ui.available_width();
+                    ui.set_max_width(width);
+                    if let Some(path) = &self.config_path {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("配置文件路径：{}", path.display()))
+                                    .size(11.0)
+                                    .color(MUTED),
+                            )
+                            .wrap(),
+                        );
                     }
                     ui.add_space(4.0);
 
                     egui::ScrollArea::vertical()
                         .max_height(112.0)
+                        .max_width(width)
+                        .auto_shrink([false, true])
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
+                            let content_width = ui.available_width().min(width);
+                            ui.set_width(content_width);
+                            ui.set_max_width(content_width);
                             if self.logs.is_empty() {
                                 ui.label(egui::RichText::new("暂无日志").size(11.0).color(MUTED));
                             } else {
                                 for line in &self.logs {
-                                    ui.label(egui::RichText::new(line).size(11.0).color(MUTED));
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(line).size(11.0).color(MUTED),
+                                        )
+                                        .wrap(),
+                                    );
                                 }
                             }
                         });
                 });
         });
-
-        if clear {
-            self.logs.clear();
-        }
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
@@ -742,7 +813,7 @@ impl InvokerApp {
         let mut hide = false;
         let mut quit = false;
         let hint = if tray_available {
-            "关闭窗口会最小化到系统托盘"
+            "关闭窗口会隐藏到系统托盘"
         } else {
             "系统托盘不可用，关闭窗口将退出程序"
         };
@@ -773,7 +844,7 @@ impl InvokerApp {
         }
 
         if hide {
-            self.push_log("已最小化到系统托盘");
+            self.push_log("已隐藏到系统托盘");
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }

@@ -24,6 +24,16 @@ struct ActiveChampionSelect {
 }
 
 impl ChampionTracker {
+    /// Reads the current selection without consuming it, so bench swaps can
+    /// produce another update within the same selection session.
+    pub fn selected_champion(&self) -> Option<Trigger> {
+        let active = self.active.as_ref()?;
+        (active.mayhem == Some(true) && active.champion_id > 0).then_some(Trigger {
+            game_id: active.game_id,
+            champion_id: active.champion_id,
+        })
+    }
+
     /// Starts tracking a new champion-select session, discarding stale state.
     pub fn begin_champ_select(&mut self, game_id: i64, mayhem: Option<bool>) {
         self.active = Some(ActiveChampionSelect {
@@ -147,6 +157,17 @@ fn is_terminal_phase(phase: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_refresh_preserves_pick_for_later_swaps() {
+        let mut tracker = mayhem_tracker(103);
+        assert_eq!(tracker.selected_champion(), trigger(42, 103));
+        assert_eq!(tracker.selected_champion(), trigger(42, 103));
+        tracker.update_champ_select(42, Some(true), Some(99));
+        assert_eq!(tracker.selected_champion(), trigger(42, 99));
+        tracker.on_phase("Lobby", 42, Some(true));
+        assert_eq!(tracker.selected_champion(), None);
+    }
 
     fn mayhem_tracker(champion_id: i64) -> ChampionTracker {
         let mut tracker = ChampionTracker::default();

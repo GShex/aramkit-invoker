@@ -6,6 +6,24 @@ use crate::config::{GameLauncher, WindowBounds};
 #[cfg(windows)]
 mod edge_navigation;
 
+pub const ARAMKIT_HOME: &str = "https://aramkit.cn/zh-CN/";
+
+pub fn detect_aramkit() -> Option<PathBuf> {
+    let root = dirs::data_local_dir()?;
+    [
+        root.join("ARAMKit/current/ARAMKit.exe"),
+        root.join("Programs/ARAMKit/ARAMKit.exe"),
+        root.join("ARAMKit/ARAMKit.exe"),
+    ]
+    .into_iter()
+    .find_map(detected_aramkit_path)
+}
+
+fn detected_aramkit_path(path: PathBuf) -> Option<PathBuf> {
+    validate_app_path(&path, true).ok()?;
+    Some(path)
+}
+
 #[derive(Default)]
 pub struct GameInstall {
     pub tcls: Option<PathBuf>,
@@ -156,7 +174,7 @@ fn process_running(path: Option<&Path>, names: &[&str]) -> bool {
 
 /// Opens a champion page in the default browser.
 ///
-/// Only ARAMKit champion URLs are accepted so that a malformed champion asset
+/// Only the ARAMKit homepage and champion URLs are accepted so that a malformed champion asset
 /// cannot turn this into an arbitrary URL opener.
 pub fn open_url(url: &str) -> Result<(), String> {
     if !is_allowed_champion_url(url) {
@@ -463,6 +481,9 @@ fn edge_windows() -> Vec<(windows_sys::Win32::Foundation::HWND, u32)> {
 }
 
 fn is_allowed_champion_url(url: &str) -> bool {
+    if url == ARAMKIT_HOME {
+        return true;
+    }
     url.strip_prefix(ARAMKIT_CHAMPION_BASE)
         .map(|slug| {
             !slug.is_empty()

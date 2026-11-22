@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const APP_DIR_NAME: &str = "aramkit-invoker";
 
 /// Persistent settings for the tray helper.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Path to the ARAMKit desktop executable.
@@ -18,6 +18,25 @@ pub struct Config {
     pub auto_launch_game: Option<GameLauncher>,
     pub browser_window: Option<WindowBounds>,
     pub main_window: Option<WindowBounds>,
+    pub auto_launch_aramkit: bool,
+    pub browser_open_homepage: bool,
+    pub browser_refresh_on_selection: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            aramkit_app_path: None,
+            tcls_path: None,
+            wegame_path: None,
+            auto_launch_game: None,
+            browser_window: None,
+            main_window: None,
+            auto_launch_aramkit: true,
+            browser_open_homepage: false,
+            browser_refresh_on_selection: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +116,15 @@ mod tests {
     }
 
     #[test]
+    fn older_settings_keep_existing_startup_and_refresh_behavior() {
+        let config: Config =
+            serde_json::from_str(r#"{"aramkit_app_path":null}"#).expect("old config");
+        assert!(config.auto_launch_aramkit);
+        assert!(!config.browser_open_homepage);
+        assert!(!config.browser_refresh_on_selection);
+    }
+
+    #[test]
     fn config_round_trips_through_disk() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("nested").join("config.json");
@@ -114,6 +142,9 @@ mod tests {
                 width: 800,
                 height: 900,
             }),
+            auto_launch_aramkit: false,
+            browser_open_homepage: true,
+            browser_refresh_on_selection: true,
             ..Config::default()
         };
 
